@@ -125,3 +125,9 @@ void uart_puts_t(const char *s){
 		uartPutc(c);
 	}
 }
+
+uint16_t uartAvailable(void){
+	
+	return ((RX_BUFFER_SIZE + rxHead - rxTail) & RX_BUFFER_MASK);
+	
+}

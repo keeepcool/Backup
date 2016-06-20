@@ -35,7 +35,8 @@ void APDS_Init(void){
 	#endif // ADSP_DEBUG
 	
 	APDS_setGain(1);
-	APDS_setIntegrationTime(INTEG_MED);
+	APDS_setIntegrationTime(INTEG_SLOW);
+	APDS_setGain(0);
 	APDS_setPower(POWER_UP);
 	
 	

@@ -47,26 +47,30 @@
 #ifndef _CONFIG_H_
 #define _CONFIG_H_
 
+#include "phy.h"
+
+/*- Definitions ------------------------------------------------------------*/
+
 /*- Definitions ------------------------------------------------------------*/
 
 // Address must be set to 0 for the first device, and to 1 for the second one.
-#define APP_ADDR                  0
+#define APP_ADDR                  1
 #define APP_PANID                 0x4567
 #define APP_ENDPOINT              1
 #define APP_SECURITY_KEY          "TestSecurityKey0"
 #define APP_FLUSH_TIMER_INTERVAL  20
 
-#ifdef PHY_AT86RF212
-  #define APP_CHANNEL             0x01
-  #define APP_BAND                0x00
-  #define APP_MODULATION          0x24
-#else
-  #define APP_CHANNEL             0x0f
-#endif
-
-#define HAL_UART_CHANNEL          1
+#define HAL_UART_CHANNEL          0
 #define HAL_UART_RX_FIFO_SIZE     200
 #define HAL_UART_TX_FIFO_SIZE     200
+
+#ifdef PHY_AT86RF212
+#define APP_CHANNEL             0x01
+#define APP_BAND                0x00
+#define APP_MODULATION          0x24
+#else
+#define APP_CHANNEL             0x0f
+#endif
 
 #define SYS_SECURITY_MODE                   0
 
@@ -79,5 +83,6 @@
 
 #define NWK_ENABLE_ROUTING
 //#define NWK_ENABLE_SECURITY
+
 
 #endif // _CONFIG_H_

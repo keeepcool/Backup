@@ -55,6 +55,7 @@
 #include "nwkGroup.h"
 #include "nwkSecurity.h"
 #include "nwkDataReq.h"
+#include "phy.h"
 
 /*- Definitions ------------------------------------------------------------*/
 #define NWK_MAX_PAYLOAD_SIZE            (127 - 16/*NwkFrameHeader_t*/ - 2/*crc*/)

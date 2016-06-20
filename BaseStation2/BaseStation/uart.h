@@ -54,6 +54,12 @@ void uartPuts(const char *s);
 void uart_puts_t(const char *s);
 
 /**
+ * Check if there is new data to be read.
+ */
+uint16_t uartAvailable(void);
+
+
+/**
  * This macro automagically puts the string/char into program memory
  */
 

@@ -22,6 +22,7 @@
 #include "BME280.h"
 #include "APDS_9301.h"
 #include "MMA8652FC.h"
+#include "atmegarfr2.h"
 
 #include "sysConfig.h"
 #include "config.h"
@@ -30,7 +31,7 @@
 #include "sys.h"
 #include "nwk.h"
 #include "sysTimer.h"
-#include "halUart.h"
+//#include "halUart.h"
 #include "halBoard.h"
 
 
@@ -45,7 +46,7 @@
 //Function declaration
 void timer3Init(void);
 void i2cScanner(void);
-void printCSV(void);
+void dataBuilder(void);
 uint64_t getMilis(void);
 
 //ISR interrupt vars
@@ -54,6 +55,7 @@ volatile uint64_t millisCount = 0;
 //Global var declaration
 uint64_t printMilis = 0;
 uint64_t ledMilis = 0;
+int16_t intLux = 0;
 uint8_t var=12;
 int8_t dir = 1;
 
@@ -65,15 +67,20 @@ char buff[64];
 
 /*- Definitions ------------------------------------------------------------*/
 #ifdef NWK_ENABLE_SECURITY
-	#define APP_BUFFER_SIZE     (NWK_MAX_PAYLOAD_SIZE - NWK_SECURITY_MIC_SIZE)
+#define APP_BUFFER_SIZE     (NWK_MAX_PAYLOAD_SIZE - NWK_SECURITY_MIC_SIZE)
 #else
-	#define APP_BUFFER_SIZE     NWK_MAX_PAYLOAD_SIZE
+#define APP_BUFFER_SIZE     NWK_MAX_PAYLOAD_SIZE
 #endif
 
 /*- Types ------------------------------------------------------------------*/
-typedef enum AppState_t{
+typedef enum AppState_t
+{
 	APP_STATE_INITIAL,
 	APP_STATE_IDLE,
+	APP_STATE_SLEEP,
+	APP_STATE_PREPARE_TO_SLEEP,
+	APP_STATE_WAKEUP
+
 } AppState_t;
 
 /*- Prototypes -------------------------------------------------------------*/
@@ -85,91 +92,73 @@ static SYS_Timer_t appTimer;
 static NWK_DataReq_t appDataReq;
 static bool appDataReqBusy = false;
 static uint8_t appDataReqBuffer[APP_BUFFER_SIZE];
-static uint8_t appUartBuffer[APP_BUFFER_SIZE];
-static uint8_t appUartBufferPtr = 0;
+//static uint8_t appUartBuffer[APP_BUFFER_SIZE];
+static uint8_t newDataTosend = 0;
 
 /*- Implementations --------------------------------------------------------*/
 
 /*************************************************************************//**
 *****************************************************************************/
-static void appDataConf(NWK_DataReq_t *req){
-appDataReqBusy = false;
-(void)req;
+static void appDataConf(NWK_DataReq_t *req)
+{
+	appDataReqBusy = false;
+	(void)req;
 }
 
 /*************************************************************************//**
 *****************************************************************************/
-static void appSendData(void)
-{
-if (appDataReqBusy || 0 == appUartBufferPtr)
-return;
+static void appSendData(void){
+	if (appDataReqBusy || newDataTosend == 0){
+			return;
+	}
+	
+	uartPutsP("\nSending\n");
 
-memcpy(appDataReqBuffer, appUartBuffer, appUartBufferPtr);
+	appDataReq.dstAddr = DEST_ADDR;
+	appDataReq.dstEndpoint = APP_ENDPOINT;
+	appDataReq.srcEndpoint = APP_ENDPOINT;
+	appDataReq.options = NWK_OPT_ACK_REQUEST | NWK_OPT_ENABLE_SECURITY;
+	appDataReq.data = appDataReqBuffer;
+	appDataReq.size = strlen(appDataReqBuffer);
+	appDataReq.confirm = appDataConf;
+	NWK_DataReq(&appDataReq);
 
-appDataReq.dstAddr = 1-APP_ADDR;
-appDataReq.dstEndpoint = APP_ENDPOINT;
-appDataReq.srcEndpoint = APP_ENDPOINT;
-appDataReq.options = NWK_OPT_ENABLE_SECURITY;
-appDataReq.data = appDataReqBuffer;
-appDataReq.size = appUartBufferPtr;
-appDataReq.confirm = appDataConf;
-NWK_DataReq(&appDataReq);
-
-appUartBufferPtr = 0;
-appDataReqBusy = true;
+	newDataTosend = 0;
+	appDataReqBusy = true;
+	
+	SYS_TimerStop(&appTimer);
+	SYS_TimerStart(&appTimer);
+	
 }
 
 /*************************************************************************//**
 *****************************************************************************/
-void HAL_UartBytesReceived(uint16_t bytes)
-{
-for (uint16_t i = 0; i < bytes; i++)
-{
-uint8_t byte = HAL_UartReadByte();
-
-if (appUartBufferPtr == sizeof(appUartBuffer))
-appSendData();
-
-if (appUartBufferPtr < sizeof(appUartBuffer))
-appUartBuffer[appUartBufferPtr++] = byte;
-}
-
-SYS_TimerStop(&appTimer);
-SYS_TimerStart(&appTimer);
+static void appTimerHandler(SYS_Timer_t *timer){
+	appSendData();
+	(void)timer;
 }
 
 /*************************************************************************//**
 *****************************************************************************/
-static void appTimerHandler(SYS_Timer_t *timer)
-{
-appSendData();
-(void)timer;
-}
-
-/*************************************************************************//**
-*****************************************************************************/
-static bool appDataInd(NWK_DataInd_t *ind)
-{
-for (uint8_t i = 0; i < ind->size; i++)
-HAL_UartWriteByte(ind->data[i]);
-return true;
+static bool appDataInd(NWK_DataInd_t *ind){
+	for (uint8_t i = 0; i < ind->size; i++){
+		//uartPutc(ind->data[i]);
+	}
+	return true;
 }
 
 /*************************************************************************//**
 *****************************************************************************/
 static void appInit(void){
+
 	NWK_SetAddr(APP_ADDR);
 	NWK_SetPanId(APP_PANID);
 	PHY_SetChannel(APP_CHANNEL);
-	#ifdef PHY_AT86RF212
-	PHY_SetBand(APP_BAND);
-	PHY_SetModulation(APP_MODULATION);
-	#endif
+	PHY_SetTxPower(TX_PWR_0_5_DBM);
+
 	PHY_SetRxState(true);
 
 	NWK_OpenEndpoint(APP_ENDPOINT, appDataInd);
-
-	HAL_BoardInit();
 
 	appTimer.interval = APP_FLUSH_TIMER_INTERVAL;
 	appTimer.mode = SYS_TIMER_INTERVAL_MODE;
@@ -178,21 +167,37 @@ static void appInit(void){
 
 /*************************************************************************//**
 *****************************************************************************/
-static void APP_TaskHandler(void)
-{
-	switch (appState)
-	{
-		case APP_STATE_INITIAL:
-		{
+static void APP_TaskHandler(void){
+	switch (appState) {
+		
+		case APP_STATE_INITIAL: {
 			appInit();
 			appState = APP_STATE_IDLE;
-		} break;
+		}
+		break;
+		
+		case APP_STATE_PREPARE_TO_SLEEP: {
+			if (!NWK_Busy()){
+				
+				NWK_SleepReq();
+				appState = APP_STATE_SLEEP;
+			}
+		}
+		break;
+		
+		case APP_STATE_WAKEUP: {
+			NWK_WakeupReq();
+			appState = APP_STATE_IDLE;
+
+		}
+		break;
 
 		case APP_STATE_IDLE:
 		break;
 
 		default:
 		break;
+		
 	}
 }
 
@@ -202,42 +207,60 @@ int main(void){
 	/* Replace with your application code */
 	
 	LED_DDR |= _BV(LED_PIN);
-	//LED_DDR &= ~_BV(LED_PIN);
-	//CTRL_DDR &= ~_BV(PLEN_PIN);
+	LED_DDR &= ~_BV(LED_PIN);
+	CTRL_DDR &= ~_BV(PLEN_PIN);
 	CTRL_DDR |= _BV(PLEN_PIN);
 	CTRL_PORT |= _BV(PLEN_PIN);	//Active low, start with pull up disabled
 	uartInit();
-	//timer3Init();
-	//i2c_init();
+	sei();
+	
+	
+	
+	uartPutsP("\nUART INIT\n");
+	timer3Init();
+	i2c_init();
 	
 	SYS_Init();
 	//HAL_UartInit(38400);
-	//sei();
+	sei();
 	
 	
-//	uartPutsP("\n[Init Done]\n");
+	uartPutsP("\n[Init Done]\n");
 	
-	//APDS_Init();
-	//BME280_Init(FIRST_INIT);
-	//MMA8652_printID();
-	//MMA8652_Init(RANGE_2G);
-	
-	  while (1){
-		  SYS_TaskHandler();
-		  HAL_UartTaskHandler();
-		  APP_TaskHandler();
-	  }
+	APDS_Init();
+	BME280_Init(FIRST_INIT);
+	MMA8652_printID();
+	MMA8652_Init(RANGE_2G);
 	
 	//i2cScanner();
 	
     while (1){
 		
+		SYS_TaskHandler();
+		APP_TaskHandler();
+		
 		//sprintf(buff, "[Lux: %f]\n", APDS_getLux());
 		//sprintf(buff, "%f\n", APDS_getLux());
 		//uartPuts(buff);
 		//LED_PORT ^= _BV(LED_PIN);
-		if(getMilis() - ledMilis >= 14){
+		
+		if(getMilis() - printMilis >= 100){
 			
+			
+			//sprintf(buff, "X: %i Y: %i Z: %i\n", axisData[0], axisData[1], axisData[2]);
+			//sprintf(buff, "%i,%i,%i\n", axisData[0], axisData[1], axisData[2]);
+			
+			/*
+			sprintf(buff, "X: %1.3f, Y: %1.3f, Z: %1.3f\n", axisFloat[0], axisFloat[1], axisFloat[2]);
+			uartPuts(buff);
+			*/
+			printMilis = getMilis();
+		}
+		
+		
+		if(getMilis() - ledMilis > 250){
+			
+			/*	
 			OCR3A=var;
 			var += dir;
 			
@@ -248,26 +271,27 @@ int main(void){
 			if(var <= 12){
 				dir = dir *(-1);
 			}
-			ledMilis = getMilis();
-		}
-		
-		
-		if(getMilis() - printMilis >= 100){
-			/*
-			while(BME280_IsMeasuring());
-			printCSV();
-			BME280_Init(0);
+			
 			*/
 			
-			//MMA8652_readAcc(axisData);
-			MMA8652_readAccG(axisFloat);
-			//sprintf(buff, "X: %i Y: %i Z: %i\n", axisData[0], axisData[1], axisData[2]);
-			//sprintf(buff, "%i,%i,%i\n", axisData[0], axisData[1], axisData[2]);
-			sprintf(buff, "X: %1.3f, Y: %1.3f, Z: %1.3f\n", axisFloat[0], axisFloat[1], axisFloat[2]);
-			uartPuts(buff);
+			//MMA8652_readAccG(axisFloat);
+			//sprintf(appDataReqBuffer, "X: %i Y: %i Z: %i\n\0", axisData[0], axisData[1], axisData[2]);
+			//uartPuts(appDataReqBuffer);
 			
-			printMilis = getMilis();
+			while(BME280_IsMeasuring());
+			dataBuilder();
+			BME280_Init(0);
+			MMA8652_readAcc(axisData);
+			intLux = APDS_getLux();
+			
+			newDataTosend = 1;
+			
+			ledMilis = getMilis();
+			
 		}
+		
+		appSendData();
+		
     }
 }
 
@@ -299,11 +323,11 @@ uint64_t getMilis(void){
 	
 }
 
-void printCSV(void){
+void dataBuilder(void){
 	
-	char Lbuff[64];
-	sprintf(Lbuff, "%4.2f,%4.2f,%4.2f,%4.2f\n", BME280_readTempC(), BME280_readFloatPressure(), BME280_readFloatAltitudeMeters(), BME280_readFloatHumidity());
-	uartPuts(Lbuff);
+	//char Lbuff[64];
+	sprintf(appDataReqBuffer, "%4.1f,%4.1f,%4.1f,%4.1f,%i\n", BME280_readTempC(), BME280_readFloatPressure(), BME280_readFloatAltitudeMeters(), BME280_readFloatHumidity(), intLux);
+	uartPuts(appDataReqBuffer);
 
 }
 

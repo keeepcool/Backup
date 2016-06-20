@@ -59,7 +59,7 @@
 *****************************************************************************/
 void SYS_Init(void){
 	
-	uartPutsP("\n[SYS_INIT]\n");
+	uartPutsP("\n[LwMesh stack init]\n");
 	HAL_Init();
 	uartPutsP(">HAL_INIT\n");
 	SYS_TimerInit();
@@ -73,9 +73,14 @@ void SYS_Init(void){
 
 /*************************************************************************//**
 *****************************************************************************/
-void SYS_TaskHandler(void)
-{
+void SYS_TaskHandler(void){
+	
+//uartPutc('=');
+
 PHY_TaskHandler();
 NWK_TaskHandler();
 SYS_TimerTaskHandler();
+
+//uartPutc('?');
+
 }
