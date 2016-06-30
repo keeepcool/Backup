@@ -8,14 +8,17 @@
 #define F_CPU	16000000UL
 
 #include <avr/interrupt.h>
-#include <util/delay.h>
 #include <avr/pgmspace.h>
+#include <util/delay.h>
+#include <avr/eeprom.h>
+#include <inttypes.h>
 #include <stdlib.h>
 #include <avr/io.h>
-#include <stdio.h>
 #include <string.h>
+#include <stdio.h>
 #include <ctype.h>
 #include <math.h>
+#include <stdint-gcc.h>
 
 #include "wizchip_conf.h"
 #include "pinMap.h"
@@ -41,6 +44,7 @@
 void hsv2rgb(uint16_t hue, uint16_t sat, uint16_t val,uint8_t * r, uint8_t  * g, uint8_t  * b, uint8_t  maxBrightness);
 int32_t clientTCP(uint8_t sn, uint8_t* destip, uint16_t destport);
 uint8_t SPI_TransferByte(uint8_t data);
+int8_t runDNSquery(uint8_t* domName);
 static void W5500_Init(void);
 void printNetInfo(void);
 uint8_t greeting(void);
@@ -50,6 +54,7 @@ void TCP_Server(void);
 void timer0Init(void);
 void timer1Init(void);
 uint64_t milis(void);
+void sendNetInfo(void);
 uint8_t spi_rb(void);
 void cs_desel(void);
 void ip_init(void);
@@ -61,35 +66,58 @@ void printCSV(void);
 
 void my_ip_conflict(void);
 void my_ip_assign(void);
- void Net_Conf(void);
+uint8_t dhcpRun(void);
+void Net_Conf(void);
+void dhcpInit(void);
 
+typedef struct{
+	unsigned char hour;
+	unsigned char min;
+	unsigned char sec;
+	unsigned char amOrPM;
+	unsigned char weekDay;
+	unsigned char day;
+	unsigned char month;
+	unsigned char year;
+} time_struct_t;
+
+typedef struct{
+	
+	float airTemp;
+	uint8_t airHR;
+	float airPress;
+	uint16_t lux;
+	int8_t moveFlag;
+	int16_t rawXaxis;
+	int16_t rawYaxis;
+	int16_t rawZaxis;
+	uint16_t battVoltage;
+	uint16_t sensorID;
+	
+}dataPacket_t;
+
+
+dataPacket_t gDatapacket;
+time_struct_t time;
 
 //Global variables declaration
 volatile uint64_t milisCount = 0;
 volatile uint8_t globalDataFlag = 0;
+volatile uint8_t newDatatoSend = 0;
 uint64_t loopTime = 0;
 uint64_t printMilis = 0;
+uint64_t dhcpTimer = 0;
+
 uint8_t Rpwm, Gpwm, Bpwm;
 uint16_t hue_value = 0;
 
-unsigned char currHr = 0;
-unsigned char currMin = 0;
-unsigned char currS = 0;
-unsigned char amOrPm = PM;
-unsigned char currDay = 0;
-unsigned char currDate = 0;
-unsigned char currMonth = 0;
-unsigned char currYear = 0;
-int16_t retVal = 0;
-
-uint16_t i = 0;
 char gSendBuff[128];
 char gTempDataBuff[128];
 char *dataArray[16];
 char* strPointer = 0;
-uint16_t gretVal = 0;
+int16_t sendRetVal = 0;
 
-char gPtrintBuff[64];
+char gPtrintBuff[128];
 
 //*********************************************************
 //********* Start Net Config ******************************
@@ -98,12 +126,16 @@ char gPtrintBuff[64];
 #define SOCK_ID_TCP			0
 #define SOCK_ID_TCP_RECV	1
 #define SOCK_DHCP			2
+#define SOCK_DNS			3
+
+#define MAX_DHCP_RETRY	2
+uint8_t my_dhcp_retry = 0;
 
 #define DATA_BUF_SIZE     1024
 uint8_t gDATABUF[DATA_BUF_SIZE];
 uint8_t gSERVER_DATABUFF[DATA_BUF_SIZE];
 
-#define PORT_TCP          5000				//Client TCP Port
+//#define PORT_TCP          5000				//Client TCP Port
 #define PORT_TCP_SERVER	  5215				//Server TCP Port
 
  wiz_NetInfo gWIZNETINFO =
@@ -112,22 +144,27 @@ uint8_t gSERVER_DATABUFF[DATA_BUF_SIZE];
 	.ip = {192, 168,  1, 2},					// Source IP Address
 	.sn = {255, 255, 255, 0},						// Subnet Mask
 	.gw = {192, 168,  1, 1},					// Gateway IP Address
-	.dns = {0, 0, 0, 0},					// DNS server IP Address
+	.dns = {8, 8, 8, 8},					// DNS server IP Address
 	.dhcp = NETINFO_DHCP
 };
 
 volatile wiz_PhyConf phyConf =
 {
 	PHY_CONFBY_HW,       // PHY_CONFBY_SW
-	PHY_MODE_MANUAL,     // PHY_MODE_AUTONEGO
-	PHY_SPEED_10,        // PHY_SPEED_100
+	PHY_MODE_AUTONEGO,     // PHY_MODE_AUTONEGO
+	PHY_SPEED_100,        // PHY_SPEED_100
 	PHY_DUPLEX_FULL,     // PHY_DUPLEX_HALF
 };
 
 volatile wiz_NetInfo pnetinfo;
 uint8_t dIP[4] = 	{192, 168, 35, 170};
 uint16_t dport = 	5214;
-#define SOCK_DNS	0
+
+
+uint8_t DNS_2nd[4] = {208, 67, 222, 222};
+uint8_t Domain_name[] = "sensors.srv.ename.pt";
+uint8_t Domain_IP[4] = {0,0,0,0};
+
 
 //*********************************************************
 //********* End Net Config ********************************
@@ -156,15 +193,22 @@ static SYS_Timer_t appTimer;
 static NWK_DataReq_t appDataReq;
 static bool appDataReqBusy = false;
 static uint8_t appDataReqBuffer[APP_BUFFER_SIZE];
-static uint8_t appUartBuffer[APP_BUFFER_SIZE];
-static uint8_t appUartBufferPtr = 0;
+//static uint8_t appUartBuffer[APP_BUFFER_SIZE];
+//static uint8_t appUartBufferPtr = 0;
 
 /*- Implementations --------------------------------------------------------*/
 
 /*************************************************************************//**
 *****************************************************************************/
-static void appDataConf(NWK_DataReq_t *req)
-{
+static void appDataConf(NWK_DataReq_t *req){
+	
+	if (NWK_SUCCESS_STATUS == req->status){
+		
+		uartPuts("\nFrame Sent\n");
+		
+	}
+	
+	
 	appDataReqBusy = false;
 	(void)req;
 }
@@ -173,21 +217,23 @@ static void appDataConf(NWK_DataReq_t *req)
 *****************************************************************************/
 static void appSendData(void){
 	
-	if (appDataReqBusy)
-	return;
+	if ((appDataReqBusy) || newDatatoSend == 0){
+		return;
+	}
+	
 
-	memcpy(appDataReqBuffer, appUartBuffer, appUartBufferPtr);
+	//memcpy(appDataReqBuffer, appUartBuffer, appUartBufferPtr);
 
 	appDataReq.dstAddr = 1-APP_ADDR;
 	appDataReq.dstEndpoint = APP_ENDPOINT;
 	appDataReq.srcEndpoint = APP_ENDPOINT;
 	appDataReq.options = NWK_OPT_ACK_REQUEST | NWK_OPT_ENABLE_SECURITY;
 	appDataReq.data = appDataReqBuffer;
-	appDataReq.size = sizeof(appUartBufferPtr);
+	appDataReq.size = sizeof(appDataReqBuffer);
 	appDataReq.confirm = appDataConf;
 	NWK_DataReq(&appDataReq);
 
-	appUartBufferPtr = 0;
+	//appUartBufferPtr = 0;
 	appDataReqBusy = true;
 	
 	SYS_TimerStop(&appTimer);
@@ -201,7 +247,6 @@ static void appSendData(void){
 
 static void appTimerHandler(SYS_Timer_t *timer){
 	
-	//uartPutsP("\nSEND DATA\n");
 	appSendData();
 	(void)timer;
 }
@@ -220,11 +265,13 @@ static bool appDataInd(NWK_DataInd_t *ind){
 	
 	*/
 	
+	globalDataFlag = 0;
+	
 	for (uint8_t i = 0; i < ind->size; i++){
-		//uartPutc(ind->data[i]);
 		gTempDataBuff[i] = ind->data[i];
-		globalDataFlag = 1;
 	}
+	
+	globalDataFlag = 1;
 	
 	ind->size = 0;
 	ind->data = 0;
@@ -271,9 +318,7 @@ static void APP_TaskHandler(void){
 *****************************************************************************/
 int main(void){
 	
-	
-	#define MY_MAX_DHCP_RETRY	2
-	uint8_t my_dhcp_retry = 0;
+	time.amOrPM = PM;
 	
 	uint8_t iter = 0;
 	
@@ -286,92 +331,64 @@ int main(void){
 	//Its day of the week, day, month, year
 	//setDate(5, 9, 6, 16);
 	
-	getTime(&currHr, &currMin, &currS , &amOrPm, t24_HOUR_FORMAT);
-	getDate(&currDay, &currDate, &currMonth, &currYear);
+	getTime(&time.hour, &time.min, &time.sec , &time.amOrPM, t24_HOUR_FORMAT);
+	getDate(&time.weekDay, &time.day, &time.month, &time.year);
 	
-	sprintf(gPtrintBuff, "[Time set]> Time: %02i:%02i:%02i \n", currHr, currMin, currS);
+	sprintf(gPtrintBuff, "[Time set]> Time: %02i:%02i:%02i \n", time.hour, time.min, time.sec);
 	uartPuts(gPtrintBuff);
 	
 	
-	sprintf(gPtrintBuff, "[Date set]> Date: %02i:%02i:%02i \n", currDate, currMonth, currYear);
+	sprintf(gPtrintBuff, "[Date set]> Date: %02i:%02i:%02i \n", time.day, time.month, time.year);
 	uartPuts(gPtrintBuff);
 	
 	
-		/* DHCP client Initialization */
-		if(gWIZNETINFO.dhcp == NETINFO_DHCP){	
-			uartPuts("\nDHCP Init\n");
-			DHCP_init(SOCK_DHCP, gDATABUF);
-			// if you want different action instead default ip assign, update, conflict.
-			// if cbfunc == 0, act as default.
-			uartPuts("\nCalling reg_dhcp\n");
-			reg_dhcp_cbfunc(my_ip_assign, my_ip_assign, my_ip_conflict);
+	
+	
+	dhcpInit();
+
+	while(dhcpRun() != 10){
+		
+		if(milis() - loopTime >= 100){
+			
+			DHCP_time_handler();
+			
+			loopTime = milis();
+			
 		}
-		
-		
-		
-		while(1){
-			
-			if(gWIZNETINFO.dhcp == NETINFO_DHCP) {
-				switch(DHCP_run())
-				{
-					case DHCP_IP_ASSIGN:
-					uartPuts("\nDHCP is assigned\n");
-					case DHCP_IP_CHANGED:
-					uartPuts("\nDHCP changed \n");
-					/* If this block empty, act with default_ip_assign & default_ip_update */
-					//
-					// This example calls my_ip_assign in the two case.
-					//
-					// Add to ...
-					//
-					break;
-					case DHCP_IP_LEASED:
-					uartPuts("\nDHCP is leased\n");
-					printNetInfo();
-					//
-					//
-					break;
-					case DHCP_FAILED:
-					uartPuts("\nDHCP FAILED\n");
-					/* ===== Example pseudo code =====  */
-					// The below code can be replaced your code or omitted.
-					// if omitted, retry to process DHCP
-					my_dhcp_retry++;
-					
-					if(my_dhcp_retry > MY_MAX_DHCP_RETRY){
-						gWIZNETINFO.dhcp = NETINFO_STATIC;
-						DHCP_stop();      // if restart, recall DHCP_init()
-						sprintf(gPtrintBuff, ">> DHCP %d Failed\r\n", my_dhcp_retry);
-						uartPuts(gPtrintBuff);
-						Net_Conf();
-						printNetInfo();   // print out static netinfo to serial
-						my_dhcp_retry = 0;
-					}
-					break;
-					default:
-					break;
-				}
-			}
-			
-			if(milis() - loopTime >= 100){
-				
-				DHCP_time_handler();
-				
-				loopTime = milis();
-				
-			}
-			
-			
-			
-			
-			
-			};
-			
+	}
+	
+	printNetInfo();
+	
+	//runDNSquery(Domain_name);
+	
+	
+	if(runDNSquery("sensors.srv.ename.pt") > 0){
+		dIP[0] = Domain_IP[0];
+		dIP[1] = Domain_IP[1];
+		dIP[2] = Domain_IP[2];
+		dIP[3] = Domain_IP[3];
+	}
+	
+	
+	
+	printNetInfo();
+	
+	while(getSn_SR(SOCK_ID_TCP) != SOCK_ESTABLISHED){
+		clientTCP(SOCK_ID_TCP, dIP, dport);
+	}
+	
+	sendNetInfo();
 	
 	while (1){
 		
 		
-		//appSendData();
+		if(milis() - dhcpTimer >= 100){
+			
+			//1 second time base for dhcp lease timer
+			//DHCP_time_handler();
+			dhcpTimer = milis();
+			
+		}
 		
 		if(milis() - loopTime >= 250){
 			
@@ -384,64 +401,107 @@ int main(void){
 				hue_value = 0;
 			}
 			
-			
-			//appSendData();
-			
 			loopTime = milis();
 			
 		}
 		
-		if(milis() - printMilis >= 1000){
-			
-			
-			
-			/*
-			getTime(&currHr, &currMin, &currS , &amOrPm, t24_HOUR_FORMAT);
-			
-			sprintf(gPtrintBuff, "Time: %i:%i:%i \n", currHr, currMin, currS);
-			uartPuts(gPtrintBuff);
-			*/
+
+		if(milis() - printMilis >= 250){
 			
 			if(globalDataFlag == 1){
 				uartPuts("\nReceived LWmesh: ");
 				uartPuts(gTempDataBuff);
-			
-			
+				
+				sprintf(appDataReqBuffer, "OK\n");
+				//appDataReqBuffer = "OK\n";
+				newDatatoSend = 1;
+				appSendData();
+				
 				iter = 0;
 				strPointer = strtok(gTempDataBuff, ",");
-			
+				
 				while(strPointer){
-				dataArray[iter] = strPointer;
-				iter++;
-				strPointer = strtok(NULL, ",");
+					dataArray[iter] = strPointer;
+					iter++;
+					strPointer = strtok(NULL, ",");
 				}
-			
-			
-			uartPuts("\nDATA FRAME\n");
-			sprintf(gPtrintBuff, "[0]: %s\n[1]: %s\n[2]: %s\n[3]: %s\n[4]: %s\n", dataArray[0], dataArray[1], dataArray[2], dataArray[3], dataArray[4]);
-			uartPuts(gPtrintBuff);
-			
-			getTime(&currHr, &currMin, &currS , &amOrPm, t24_HOUR_FORMAT);
-			getDate(&currDay, &currDate, &currMonth, &currYear);
-			
-			float fTemp = atof(dataArray[0]);
-			int fHR = atof(dataArray[3]);
-			float fPressure = atof(dataArray[1]);
-			fPressure = fPressure / 100;
-			uint16_t intLux = atoi(dataArray[4]);
-			
-			sprintf(gDATABUF, "D%i:%i:%i_%i:%i:%i I%i T%.2f H%i P%.2f, L%i\n", (currYear+2000), currMonth, currDate, currHr,currMin, currS, 42, fTemp, fHR, fPressure, intLux);
-			uartPuts(gDATABUF);
-			
-			//retVal = send(SOCK_ID_TCP, gDATABUF, sizeof(gDATABUF));
-			//retVal = recv(SOCK_ID_TCP_RECV,gDATABUF, sizeof(gDATABUF));
-			/*
-			sprintf(gPtrintBuff, "Got %i bytes\n", retVal);
-			uartPuts(gPtrintBuff);
-			uartPuts(gDATABUF);
-			*/
-			globalDataFlag = 0;
-			
+				
+				for(uint8_t j = 0; j<iter; j++){
+					
+					switch (dataArray[j][0])
+					{
+						
+						case 'I':							//Sensor ID
+						gDatapacket.sensorID = atoi(dataArray[j]+1);
+						sprintf(gPtrintBuff, "I: %i \n", gDatapacket.sensorID);
+						uartPuts(gPtrintBuff);
+						break;
+						
+						case 'T':							//Air temperature
+						gDatapacket.airTemp = atof(dataArray[j]+1);
+						sprintf(gPtrintBuff, "T: %f \n", gDatapacket.airTemp);
+						uartPuts(gPtrintBuff);
+						break;
+						
+						case 'P':							//Air pressure
+						gDatapacket.airPress = (atof(dataArray[j]+1)/100000.0);
+						sprintf(gPtrintBuff, "P: %f \n", gDatapacket.airPress);
+						uartPuts(gPtrintBuff);
+						break;
+						
+						case 'L':							//Luminosity
+						gDatapacket.lux = atoi(dataArray[j]+1);
+						sprintf(gPtrintBuff, "L: %i \n", gDatapacket.lux);
+						uartPuts(gPtrintBuff);
+						break;
+						case 'V':							//Sensor batt voltage
+						gDatapacket.battVoltage = atof(dataArray[j]+1);
+						sprintf(gPtrintBuff, "V: %i \n", gDatapacket.battVoltage);
+						uartPuts(gPtrintBuff);
+						break;
+						
+						case 'H':							//Air moisture
+						gDatapacket.airHR = atoi(dataArray[j]+1);
+						sprintf(gPtrintBuff, "H: %i \n", gDatapacket.airHR);
+						uartPuts(gPtrintBuff);
+						break;
+						
+						case 'A':							//Sensor batt voltage
+						gDatapacket.moveFlag = atoi(dataArray[j]+1);
+						sprintf(gPtrintBuff, "A: %i \n", gDatapacket.moveFlag);
+						uartPuts(gPtrintBuff);
+						break;
+					}
+				}
+				
+				getTime(&time.hour, &time.min, &time.sec , &time.amOrPM, t24_HOUR_FORMAT);
+				getDate(&time.weekDay, &time.day, &time.month, &time.year);
+				
+				sprintf(gDATABUF, "D%i:%i:%i_%i:%i:%i I%i T%.1f H%i P%.3f L%i V%i", (time.year+2000), time.month, time.day, time.hour,time.min, time.sec, gDatapacket.sensorID, gDatapacket.airTemp, gDatapacket.airHR, gDatapacket.airPress, gDatapacket.lux, gDatapacket.battVoltage);
+				uartPuts(gDATABUF);
+				uartPutc('\n');
+				
+				sendRetVal = send(SOCK_ID_TCP, gDATABUF, strlen(gDATABUF));
+				sprintf(gPtrintBuff, "ETH: Sent %i bytes\n", sendRetVal);
+				uartPuts(gPtrintBuff);
+				//uartPuts(gDATABUF);
+				//uartPutc('\n');
+				
+				memset(gDATABUF, NULL, sizeof(gDATABUF));
+				
+				sendRetVal = recv(SOCK_ID_TCP,gDATABUF, sizeof(gDATABUF));
+				uartPuts(gDATABUF);
+				uartPutc('\n');
+				
+				//close(SOCK_ID_TCP);
+				
+				sprintf(gPtrintBuff, "ETH: Sent %i bytes\n", sendRetVal);
+				uartPuts(gPtrintBuff);
+				//uartPuts(gDATABUF);
+				
+				
+				globalDataFlag = 0;
+				
 			}
 			
 			printMilis = milis();
@@ -455,12 +515,12 @@ int main(void){
 		
 		//sprintf(gDATABUF, "%u | Temp: %.2f RH: %.2f \n", i , temperature, humidity);
 		
-		//APP_TaskHandler();
 		APP_TaskHandler();
 		SYS_TaskHandler();
 		
 		//Handle the ethernet interface
-		//clientTCP(SOCK_ID_TCP, dIP, dport);
+		
+		clientTCP(SOCK_ID_TCP, dIP, dport);
 		TCP_Server();
 		
 		//serial "command" handler
@@ -474,6 +534,114 @@ int main(void){
 	}
 }
 
+
+int8_t runDNSquery(uint8_t* domName){
+	
+	int8_t errVal = 0;
+	
+	//printNetInfo();
+	//sendNetInfo();
+	
+	uartPutsP("\nStarting DNS query\n");
+
+	sprintf(gPtrintBuff, "DNS Servers\n");
+	uartPuts(gPtrintBuff);
+	sprintf(gPtrintBuff,"> DNS 1st : %d.%d.%d.%d\r\n", gWIZNETINFO.dns[0], gWIZNETINFO.dns[1], gWIZNETINFO.dns[2], gWIZNETINFO.dns[3]);
+	uartPuts(gPtrintBuff);
+	sprintf(gPtrintBuff,"> DNS 2nd : %d.%d.%d.%d\r\n", DNS_2nd[0], DNS_2nd[1], DNS_2nd[2], DNS_2nd[3]);
+	uartPuts(gPtrintBuff);
+	sprintf(gPtrintBuff,"=======================================\r\n");
+	uartPuts(gPtrintBuff);
+	sprintf(gPtrintBuff,"> [Example] Target Domain Name : %s\r\n", Domain_name);
+	uartPuts(gPtrintBuff);
+	
+	DNS_init(SOCK_DNS, gDATABUF);
+	
+	/* DNS processing */
+	if ((errVal = DNS_run(gWIZNETINFO.dns, Domain_name, Domain_IP)) > 0){ // try to 1st DNS
+		uartPutsP("> 1st DNS Respond\n");
+	}
+	
+	else if ((errVal != -1) && ((errVal = DNS_run(DNS_2nd, Domain_name, Domain_IP))>0)){     // retry to 2nd DNS
+		uartPutsP("> 2nd DNS Respond\n");
+	}
+	else if(errVal == -1){
+		uartPutsP("> MAX_DOMAIN_NAME is too small. Should be redefined it.\n");
+	}
+	else{
+		uartPutsP("> DNS Failed\n");
+	}
+
+	if(errVal > 0)
+	{
+		sprintf(gPtrintBuff, "> Translated %s to [%d.%d.%d.%d]\n",Domain_name,Domain_IP[0],Domain_IP[1],Domain_IP[2],Domain_IP[3]);
+		uartPuts(gPtrintBuff);
+	}
+	
+	return errVal;
+	
+	
+}
+
+
+uint8_t dhcpRun(void){
+	
+	uint8_t ipStatus = 0;
+	
+	if(gWIZNETINFO.dhcp == NETINFO_DHCP) {
+		switch(DHCP_run())
+		{
+			case DHCP_IP_ASSIGN:
+			uartPuts("\nDHCP is assigned\n");
+			
+			case DHCP_IP_CHANGED:
+			uartPuts("\nDHCP changed \n");
+			break;
+			
+			case DHCP_IP_LEASED:
+			uartPuts("\nDHCP is leased\n");
+			//printNetInfo();
+			ipStatus = 10;
+			//
+			//
+			break;
+			case DHCP_FAILED:
+			uartPuts("\nDHCP FAILED\n");
+			/* ===== Example pseudo code =====  */
+			// The below code can be replaced your code or omitted.
+			// if omitted, retry to process DHCP
+			my_dhcp_retry++;
+			
+			if(my_dhcp_retry > MAX_DHCP_RETRY){
+				gWIZNETINFO.dhcp = NETINFO_STATIC;
+				DHCP_stop();      // if restart, recall DHCP_init()
+				sprintf(gPtrintBuff, ">> DHCP %d Failed\r\n", my_dhcp_retry);
+				uartPuts(gPtrintBuff);
+				Net_Conf();
+				//printNetInfo();   // print out static netinfo to serial
+				my_dhcp_retry = 0;
+			}
+			break;
+			default:
+			break;
+		}
+	}
+	
+	return ipStatus;
+	
+}
+
+void dhcpInit(void) {/* DHCP client Initialization */
+	if(gWIZNETINFO.dhcp == NETINFO_DHCP){
+		uartPuts("\nDHCP Init\n");
+		DHCP_init(SOCK_DHCP, gDATABUF);
+		// if you want different action instead default ip assign, update, conflict.
+		// if cbfunc == 0, act as default.
+		uartPuts("\nCalling reg_dhcp\n");
+		reg_dhcp_cbfunc(my_ip_assign, my_ip_assign, my_ip_conflict);
+	}
+}
+
 void my_ip_assign(void) {
    getIPfromDHCP(gWIZNETINFO.ip);
    getGWfromDHCP(gWIZNETINFO.gw);
@@ -483,8 +651,8 @@ void my_ip_assign(void) {
    
    /* Network initialization */
    Net_Conf();      // apply from DHCP
-   printNetInfo();
-   sprintf(gPtrintBuff, "DHCP LEASED TIME : %ld Sec.\r\n", getDHCPLeasetime());
+   //printNetInfo();
+   sprintf(gPtrintBuff, "DHCP LEASE TIME : %ld Sec.\r\n", getDHCPLeasetime());
    uartPuts(gPtrintBuff);
    
 }
@@ -550,7 +718,7 @@ int32_t clientTCP(uint8_t sn, uint8_t* destip, uint16_t destport){
 		close(sn);
 		if((ret=socket(sn, Sn_MR_TCP, any_port, 0x00)) != sn) return ret; // TCP socket open with 'any_port' port number
 		
-		sprintf(gPtrintBuff, "%d:TCP client loopback start\r\n",sn);
+		sprintf(gPtrintBuff, "%d:TCP client started\r\n",sn);
 		uartPuts(gPtrintBuff);
 		sprintf(gPtrintBuff, "%d:Socket opened\r\n",sn);
 		uartPuts(gPtrintBuff);
@@ -589,6 +757,7 @@ void TCP_Server(void){
 				
 				if(ret > 0 ){
 					
+					uartPuts("\nCLIENT SAYS: ");
 					uartPuts(gSERVER_DATABUFF);					
 				}
 				
@@ -682,6 +851,22 @@ void i2cScanner(void){
 	uartPutsP("[I2C Scan Complete!]\n");
 }
 
+void sendNetInfo(void){
+	
+	int16_t error = 0;
+	wiz_NetInfo readBack;
+	
+	wizchip_getnetinfo(&readBack);
+	
+	sprintf(gDATABUF, "IP %d.%d.%d.%d", readBack.ip[0], readBack.ip[1], readBack.ip[2], readBack.ip[3]);
+	uartPuts(gDATABUF);
+	uartPutc('\n');
+	error = send(SOCK_ID_TCP, gDATABUF, strlen(gDATABUF));
+	clientTCP(SOCK_ID_TCP, dIP, dport);
+	sprintf(gPtrintBuff, "Send error: %i \n", error);
+	uartPuts(gPtrintBuff);
+}
+
 void printNetInfo(void){
 	
 	wiz_NetInfo readBack;
@@ -706,7 +891,6 @@ void printNetInfo(void){
 	uartPuts(gPtrintBuff);
 	sprintf(gPtrintBuff, " SN : %d.%d.%d.%d\n", readBack.sn[0], readBack.sn[1], readBack.sn[2], readBack.sn[3]);
 	uartPuts(gPtrintBuff);
-	//readBack.dns
 	sprintf(gPtrintBuff, "=======================================\r\n");
 	uartPuts(gPtrintBuff);
 	

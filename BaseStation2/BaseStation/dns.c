@@ -56,6 +56,7 @@
 //#include "Internet/DNS/dns.h"
 #include "socket.h"
 #include "dns.h"
+#include "uart.h"
 
 #ifdef _DNS_DEBUG_
    #include <stdio.h>

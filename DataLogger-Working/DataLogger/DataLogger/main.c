@@ -33,6 +33,8 @@
 #include "sysTimer.h"
 //#include "halUart.h"
 #include "halBoard.h"
+uint16_t adcRead(uint8_t channel);
+void adcInit(void);
 
 
 /*- Definitions ------------------------------------------------------------*/
@@ -42,11 +44,12 @@
 #define APP_BUFFER_SIZE     NWK_MAX_PAYLOAD_SIZE
 #endif
 
+#define VREF			(1800.0f)
+#define ADC_CNTS		(1023.0f)
 
 //Function declaration
 void timer3Init(void);
 void i2cScanner(void);
-void dataBuilder(void);
 uint64_t getMilis(void);
 
 //ISR interrupt vars
@@ -54,7 +57,7 @@ volatile uint64_t millisCount = 0;
 
 //Global var declaration
 uint64_t printMilis = 0;
-uint64_t ledMilis = 0;
+uint64_t dataMilis = 0;
 int16_t intLux = 0;
 uint8_t var=12;
 int8_t dir = 1;
@@ -62,7 +65,58 @@ int8_t dir = 1;
 int16_t axisData[3];
 float axisFloat[3];
 
-char buff[64];
+char buff[256];
+char gPrintBuff[256];
+char gTempDataBuff[256];
+
+float FLT_CONST = (float)(VREF/ADC_CNTS);
+
+typedef struct dataPacket_t
+{
+	
+	float airTemp;
+	uint8_t airHR;
+	float airPress;
+	uint16_t lux;
+	int8_t moveFlag;
+	int16_t rawXaxis;
+	int16_t rawYaxis;
+	int16_t rawZaxis;
+	uint16_t battVoltage;
+	
+}dataPacket;
+
+
+typedef struct sysConf_t{
+	
+	uint16_t sendInterval;	//Value in seconds between data packets
+	uint16_t selfID;
+	int8_t sendRawAcc;		//Enable/disable raw acc axis data
+	
+}sysConf;
+
+
+dataPacket gDataPacket = {
+	.airTemp = 0,
+	.airHR = 0,
+	.airPress = 0,
+	.lux = 0,
+	.moveFlag = 0,
+	.rawXaxis = 0,
+	.rawYaxis = 0,
+	.rawZaxis = 0,
+	.battVoltage = 0	
+};
+
+
+
+sysConf gSysConf = {
+	
+	.sendInterval = 1,
+	.selfID = 20,
+	.sendRawAcc = 0
+};
+
 
 
 /*- Definitions ------------------------------------------------------------*/
@@ -99,8 +153,17 @@ static uint8_t newDataTosend = 0;
 
 /*************************************************************************//**
 *****************************************************************************/
-static void appDataConf(NWK_DataReq_t *req)
-{
+static void appDataConf(NWK_DataReq_t *req){
+	
+	if (NWK_SUCCESS_STATUS == req->status){
+		
+		if(NWK_SUCCESS_STATUS == req->status){
+			
+			uartPuts("\nFRAME SENT\n");
+		}
+		
+	}	
+	
 	appDataReqBusy = false;
 	(void)req;
 }
@@ -108,12 +171,11 @@ static void appDataConf(NWK_DataReq_t *req)
 /*************************************************************************//**
 *****************************************************************************/
 static void appSendData(void){
+	
 	if (appDataReqBusy || newDataTosend == 0){
 			return;
 	}
 	
-	uartPutsP("\nSending\n");
-
 	appDataReq.dstAddr = DEST_ADDR;
 	appDataReq.dstEndpoint = APP_ENDPOINT;
 	appDataReq.srcEndpoint = APP_ENDPOINT;
@@ -141,8 +203,13 @@ static void appTimerHandler(SYS_Timer_t *timer){
 /*************************************************************************//**
 *****************************************************************************/
 static bool appDataInd(NWK_DataInd_t *ind){
+	
+	sprintf(gPrintBuff, "Received :%i\n", ind->size);
+	uartPuts(gPrintBuff);
+	
 	for (uint8_t i = 0; i < ind->size; i++){
 		//uartPutc(ind->data[i]);
+		gTempDataBuff[i] = ind->data[i];
 	}
 	return true;
 }
@@ -207,30 +274,27 @@ int main(void){
 	/* Replace with your application code */
 	
 	LED_DDR |= _BV(LED_PIN);
-	LED_DDR &= ~_BV(LED_PIN);
+	//LED_DDR &= ~_BV(LED_PIN);
 	CTRL_DDR &= ~_BV(PLEN_PIN);
 	CTRL_DDR |= _BV(PLEN_PIN);
 	CTRL_PORT |= _BV(PLEN_PIN);	//Active low, start with pull up disabled
 	uartInit();
 	sei();
 	
-	
-	
-	uartPutsP("\nUART INIT\n");
 	timer3Init();
 	i2c_init();
-	
 	SYS_Init();
-	//HAL_UartInit(38400);
+	adcInit();
+	adcRead(2);
+	
 	sei();
-	
-	
-	uartPutsP("\n[Init Done]\n");
 	
 	APDS_Init();
 	BME280_Init(FIRST_INIT);
-	MMA8652_printID();
+	//MMA8652_printID();
 	MMA8652_Init(RANGE_2G);
+	
+	uartPutsP("\n[Init Done]\n");
 	
 	//i2cScanner();
 	
@@ -239,26 +303,16 @@ int main(void){
 		SYS_TaskHandler();
 		APP_TaskHandler();
 		
-		//sprintf(buff, "[Lux: %f]\n", APDS_getLux());
-		//sprintf(buff, "%f\n", APDS_getLux());
-		//uartPuts(buff);
-		//LED_PORT ^= _BV(LED_PIN);
-		
+		/*
 		if(getMilis() - printMilis >= 100){
 			
 			
-			//sprintf(buff, "X: %i Y: %i Z: %i\n", axisData[0], axisData[1], axisData[2]);
-			//sprintf(buff, "%i,%i,%i\n", axisData[0], axisData[1], axisData[2]);
-			
-			/*
-			sprintf(buff, "X: %1.3f, Y: %1.3f, Z: %1.3f\n", axisFloat[0], axisFloat[1], axisFloat[2]);
-			uartPuts(buff);
-			*/
 			printMilis = getMilis();
 		}
+		*/
 		
 		
-		if(getMilis() - ledMilis > 250){
+		if(getMilis() - dataMilis > (gSysConf.sendInterval * 1000)){
 			
 			/*	
 			OCR3A=var;
@@ -271,26 +325,44 @@ int main(void){
 			if(var <= 12){
 				dir = dir *(-1);
 			}
-			
 			*/
+			
 			
 			//MMA8652_readAccG(axisFloat);
 			//sprintf(appDataReqBuffer, "X: %i Y: %i Z: %i\n\0", axisData[0], axisData[1], axisData[2]);
 			//uartPuts(appDataReqBuffer);
 			
 			while(BME280_IsMeasuring());
-			dataBuilder();
 			BME280_Init(0);
-			MMA8652_readAcc(axisData);
-			intLux = APDS_getLux();
+			gDataPacket.airHR = BME280_readFloatHumidity();
+			gDataPacket.airPress = BME280_readFloatPressure();
+			gDataPacket.airTemp = BME280_readTempC();
+			gDataPacket.lux = APDS_getLux();
+			gDataPacket.battVoltage = adcRead(2)*(FLT_CONST*4);
+			if(gSysConf.sendRawAcc){
+				MMA8652_readAcc(axisData);
+				gDataPacket.rawXaxis = axisData[0];
+				gDataPacket.rawYaxis = axisData[1];
+				gDataPacket.rawZaxis = axisData[2];
+			}
+			
+			sprintf(appDataReqBuffer, "I%i,P%.1f,H%i,T%.1f,L%i,A%i,V%i\n", gSysConf.selfID, gDataPacket.airPress, gDataPacket.airHR, gDataPacket.airTemp, gDataPacket.lux, gDataPacket.moveFlag, gDataPacket.battVoltage);
+			uartPuts(appDataReqBuffer);
+			sprintf(gPrintBuff, "String length: %i\n",strlen(appDataReqBuffer));
+			uartPuts(gPrintBuff);
+			
+			
 			
 			newDataTosend = 1;
+			appSendData();
 			
-			ledMilis = getMilis();
+			uartPuts(gTempDataBuff);
+			
+			dataMilis = getMilis();
 			
 		}
 		
-		appSendData();
+		
 		
     }
 }
@@ -323,12 +395,22 @@ uint64_t getMilis(void){
 	
 }
 
-void dataBuilder(void){
-	
-	//char Lbuff[64];
-	sprintf(appDataReqBuffer, "%4.1f,%4.1f,%4.1f,%4.1f,%i\n", BME280_readTempC(), BME280_readFloatPressure(), BME280_readFloatAltitudeMeters(), BME280_readFloatHumidity(), intLux);
-	uartPuts(appDataReqBuffer);
+void adcInit(void){
 
+	ADCSRA |= ((1<<ADPS2)|(1<<ADPS1)|(1<<ADPS0));	//16Mhz/128 = 125Khz
+	ADMUX |= (0<<REFS1)|(1<<REFS0);				//Referencia de 5v
+	ADMUX &= ~(1<<REFS1);
+	ADCSRC |= _BV(ADTHT1);
+	ADCSRA |= (1<<ADEN);				//Adc ligada
+	ADCSRA |= (1<<ADSC);				//Fazer uma primeira conversão para iniciar o circuito e porque é a mais lenta
+}
+
+uint16_t adcRead(uint8_t channel){
+	ADMUX &= 0xE0;						//Limpa o canal anterior
+	ADMUX |= channel;					//Define o novo canal a ler do ADC
+	ADCSRA |= (1<<ADSC);				//Inicia uma nova conversão
+	while(ADCSRA & (1<<ADSC));			//Espera que a conversão seja feita
+	return (ADCW);						//Retorna o valor do ADC
 }
 
 

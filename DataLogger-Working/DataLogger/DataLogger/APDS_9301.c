@@ -34,11 +34,9 @@ void APDS_Init(void){
 	uartPutsP("Inside Init\n");
 	#endif // ADSP_DEBUG
 	
-	APDS_setGain(1);
 	APDS_setIntegrationTime(INTEG_SLOW);
 	APDS_setGain(0);
 	APDS_setPower(POWER_UP);
-	
 	
 }
 
@@ -49,7 +47,6 @@ void APDS_setPower(uint8_t powerSetting){
 	#endif // ADSP_DEBUG
 	
 	APDS_writeRegister(CONTROL, powerSetting);
-	
 }
 
 float APDS_getLux(void){
@@ -106,13 +103,6 @@ uint8_t APDS_readID(void){
 	#endif // ADSP_DEBUG
 	
 	temp = APDS_readRegister(APDS_ID);
-	
-	/*
-	i2c_start(APDS_ADDRESS+I2C_WRITE);
-	i2c_write((0x80+APDS_ID));
-	i2c_rep_start(APDS_ADDRESS+I2C_READ);
-	return i2c_readAck();
-	*/
 	
 	return temp;
 	

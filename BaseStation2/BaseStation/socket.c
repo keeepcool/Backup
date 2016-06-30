@@ -1,6 +1,7 @@
 // SOCKET APIs Implementation
 
 #include "Socket.h"
+#include "uart.h"
 #include <stdint.h>
 
 #define SOCK_ANY_PORT_NUM  0xC000
@@ -294,9 +295,10 @@ int32_t send(uint8_t sn, uint8_t * buf, uint16_t len)
     {
         len = freesize; // check size not to exceed MAX size.
     }
-    
+  
+	
     while(1)
-    {
+    {	
         freesize = getSn_TX_FSR(sn);
         tmp = getSn_SR(sn);
         if ((tmp != SOCK_ESTABLISHED) && (tmp != SOCK_CLOSE_WAIT))
